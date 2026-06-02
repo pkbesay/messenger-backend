@@ -92,7 +92,17 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
-  await initDB();
-  console.log(`Server running on port ${process.env.PORT}`);
-});
+async function start() {
+  try {
+    await initDB();
+  } catch (err) {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  }
+
+  server.listen(process.env.PORT || 3000, '0.0.0.0', () => {
+    console.log(`Server running on port ${process.env.PORT || 3000}`);
+  });
+}
+
+start();
