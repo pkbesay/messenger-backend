@@ -91,7 +91,86 @@ io.on('connection', (socket) => {
     console.log('User disconnected:', socket.id);
   });
 });
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
+// Хранилище для аватаров
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = './uploads';
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${Date.now()}-${file.originalname}`);
+    }
+});
+const upload = multer({ storage });
+
+// Отдача файлов
+app.use('/uploads', express.static('uploads'));
+
+// Обновить профиль (имя, никнейм, bio)
+app.put('/users/:userId', async (req, res) => {
+    const { userId } = req.params;
+    const { nickname, username, bio, moodEmoji, moodStatus } = req.body;
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                nickname TEXT,
+                username TEXT UNIQUE,
+                bio TEXT,
+                avatar_url TEXT,
+                mood_emoji TEXT,
+                mood_status TEXT,
+                is_online BOOLEAN DEFAULT false,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        const result = await pool.query(`
+            INSERT INTO users (id, nickname, username, bio, mood_emoji, mood_status)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO UPDATE SET
+                nickname = EXCLUDED.nickname,
+                username = EXCLUDED.username,
+                bio = EXCLUDED.bio,
+                mood_emoji = EXCLUDED.mood_emoji,
+                mood_status = EXCLUDED.mood_status
+            RETURNING *
+        `, [userId, nickname, username, bio, moodEmoji, moodStatus]);
+        res.json(result.rows[0]);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Загрузить аватар
+app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
+    const { userId } = req.params;
+    const avatarUrl = `/uploads/${req.file.filename}`;
+    try {
+        await pool.query(`
+            UPDATE users SET avatar_url = $1 WHERE id = $2
+        `, [avatarUrl, userId]);
+        res.json({ avatarUrl });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Получить профиль
+app.get('/users/:userId', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        res.json(result.rows[0]);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 server.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
   await initDB();
   console.log(`Server running on port ${process.env.PORT}`);
