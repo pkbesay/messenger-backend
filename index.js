@@ -38,32 +38,52 @@ async function initDB() {
 
 // Получить чаты пользователя
 app.get('/chats/:userId', async (req, res) => {
-  const { userId } = req.params;
-  const result = await pool.query(
-    'SELECT * FROM chats WHERE $1 = ANY(participants) ORDER BY last_message_time DESC',
-    [userId]
-  );
-  res.json(result.rows);
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM chats WHERE $1 = ANY(participants) ORDER BY last_message_time DESC',
+      [userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching chats:', err);
+    res.status(500).json({ error: 'Failed to fetch chats' });
+  }
 });
 
 // Создать чат
 app.post('/chats', async (req, res) => {
-  const { participants } = req.body;
-  const result = await pool.query(
-    'INSERT INTO chats (participants) VALUES ($1) RETURNING *',
-    [participants]
-  );
-  res.json(result.rows[0]);
+  try {
+    const { participants } = req.body;
+    const result = await pool.query(
+      'INSERT INTO chats (participants) VALUES ($1) RETURNING *',
+      [participants]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error creating chat:', err);
+    res.status(500).json({ error: 'Failed to create chat' });
+  }
 });
 
 // Получить сообщения чата
 app.get('/messages/:chatId', async (req, res) => {
-  const { chatId } = req.params;
-  const result = await pool.query(
-    'SELECT * FROM messages WHERE chat_id = $1 ORDER BY created_at ASC',
-    [chatId]
-  );
-  res.json(result.rows);
+  try {
+    const { chatId } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM messages WHERE chat_id = $1 ORDER BY created_at ASC',
+      [chatId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching messages:', err);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
 });
 
 // WebSocket — реальное время
@@ -75,16 +95,21 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    const { chatId, senderId, text, type, mediaUrl } = data;
-    const result = await pool.query(
-      'INSERT INTO messages (chat_id, sender_id, text, type, media_url) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [chatId, senderId, text, type || 'text', mediaUrl || null]
-    );
-    await pool.query(
-      'UPDATE chats SET last_message = $1, last_message_time = NOW() WHERE id = $2',
-      [text, chatId]
-    );
-    io.to(chatId).emit('new_message', result.rows[0]);
+    try {
+      const { chatId, senderId, text, type, mediaUrl } = data;
+      const result = await pool.query(
+        'INSERT INTO messages (chat_id, sender_id, text, type, media_url) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+        [chatId, senderId, text, type || 'text', mediaUrl || null]
+      );
+      await pool.query(
+        'UPDATE chats SET last_message = $1, last_message_time = NOW() WHERE id = $2',
+        [text, chatId]
+      );
+      io.to(chatId).emit('new_message', result.rows[0]);
+    } catch (err) {
+      console.error('Error sending message:', err);
+      socket.emit('error', { message: 'Failed to send message' });
+    }
   });
 
   socket.on('disconnect', () => {
@@ -92,10 +117,10 @@ io.on('connection', (socket) => {
   });
 });
 const multer = require('multer');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 
-// Хранилище для аватаров
+// Хранилище аватаров
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = './uploads';
@@ -107,15 +132,13 @@ const storage = multer.diskStorage({
     }
 });
 const upload = multer({ storage });
-
-// Отдача файлов
 app.use('/uploads', express.static('uploads'));
 
-// Обновить профиль (имя, никнейм, bio)
+// Создать/обновить профиль
 app.put('/users/:userId', async (req, res) => {
-    const { userId } = req.params;
-    const { nickname, username, bio, moodEmoji, moodStatus } = req.body;
     try {
+        const { userId } = req.params;
+        const { nickname, username, bio, moodEmoji, moodStatus } = req.body;
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
@@ -148,12 +171,10 @@ app.put('/users/:userId', async (req, res) => {
 
 // Загрузить аватар
 app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
-    const { userId } = req.params;
-    const avatarUrl = `/uploads/${req.file.filename}`;
     try {
-        await pool.query(`
-            UPDATE users SET avatar_url = $1 WHERE id = $2
-        `, [avatarUrl, userId]);
+        const { userId } = req.params;
+        const avatarUrl = `/uploads/${req.file.filename}`;
+        await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, userId]);
         res.json({ avatarUrl });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -162,14 +183,19 @@ app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
 
 // Получить профиль
 app.get('/users/:userId', async (req, res) => {
-    const { userId } = req.params;
     try {
+        const { userId } = req.params;
         const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
         res.json(result.rows[0]);
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
+});
+
+server.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
+    await initDB();
+    console.log(`Server running on port ${process.env.PORT}`);
 });
 server.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
   await initDB();
