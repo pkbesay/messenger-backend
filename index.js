@@ -2,6 +2,9 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const pool = require('./db');
 require('dotenv').config();
 
@@ -11,6 +14,20 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static('uploads'));
+
+// Хранилище аватаров
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = './uploads';
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${Date.now()}-${file.originalname}`);
+    }
+});
+const upload = multer({ storage });
 
 // Создание таблиц
 async function initDB() {
@@ -32,11 +49,24 @@ async function initDB() {
       media_url TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      nickname TEXT,
+      username TEXT UNIQUE,
+      bio TEXT,
+      avatar_url TEXT,
+      mood_emoji TEXT,
+      mood_status TEXT,
+      is_online BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
   console.log('DB initialized');
 }
 
-// Получить чаты пользователя
+// --- Chats ---
+
 app.get('/chats/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -51,7 +81,6 @@ app.get('/chats/:userId', async (req, res) => {
   }
 });
 
-// Создать чат
 app.post('/chats', async (req, res) => {
   try {
     const { participants } = req.body;
@@ -66,7 +95,8 @@ app.post('/chats', async (req, res) => {
   }
 });
 
-// Получить сообщения чата
+// --- Messages ---
+
 app.get('/messages/:chatId', async (req, res) => {
   try {
     const { chatId } = req.params;
@@ -81,12 +111,59 @@ app.get('/messages/:chatId', async (req, res) => {
   }
 });
 
-// Health check
+// --- Users ---
+
+app.get('/users/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+        res.json(result.rows[0]);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/users/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { nickname, username, bio, moodEmoji, moodStatus } = req.body;
+        const result = await pool.query(`
+            INSERT INTO users (id, nickname, username, bio, mood_emoji, mood_status)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO UPDATE SET
+                nickname = EXCLUDED.nickname,
+                username = EXCLUDED.username,
+                bio = EXCLUDED.bio,
+                mood_emoji = EXCLUDED.mood_emoji,
+                mood_status = EXCLUDED.mood_status
+            RETURNING *
+        `, [userId, nickname, username, bio, moodEmoji, moodStatus]);
+        res.json(result.rows[0]);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const avatarUrl = `/uploads/${req.file.filename}`;
+        await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, userId]);
+        res.json({ avatarUrl });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- Health ---
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// WebSocket — реальное время
+// --- WebSocket ---
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -116,88 +193,10 @@ io.on('connection', (socket) => {
     console.log('User disconnected:', socket.id);
   });
 });
-const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
 
-// Хранилище аватаров
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const dir = './uploads';
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-        cb(null, dir);
-    },
-    filename: (req, file, cb) => {
-        cb(null, `${Date.now()}-${file.originalname}`);
-    }
-});
-const upload = multer({ storage });
-app.use('/uploads', express.static('uploads'));
-
-// Создать/обновить профиль
-app.put('/users/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const { nickname, username, bio, moodEmoji, moodStatus } = req.body;
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                nickname TEXT,
-                username TEXT UNIQUE,
-                bio TEXT,
-                avatar_url TEXT,
-                mood_emoji TEXT,
-                mood_status TEXT,
-                is_online BOOLEAN DEFAULT false,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        const result = await pool.query(`
-            INSERT INTO users (id, nickname, username, bio, mood_emoji, mood_status)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (id) DO UPDATE SET
-                nickname = EXCLUDED.nickname,
-                username = EXCLUDED.username,
-                bio = EXCLUDED.bio,
-                mood_emoji = EXCLUDED.mood_emoji,
-                mood_status = EXCLUDED.mood_status
-            RETURNING *
-        `, [userId, nickname, username, bio, moodEmoji, moodStatus]);
-        res.json(result.rows[0]);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// Загрузить аватар
-app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const avatarUrl = `/uploads/${req.file.filename}`;
-        await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, userId]);
-        res.json({ avatarUrl });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// Получить профиль
-app.get('/users/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-        res.json(result.rows[0]);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+// --- Start ---
 
 server.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
     await initDB();
-    console.log(`Server running on port ${process.env.PORT}`);
-});
-server.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
-  await initDB();
-  console.log(`Server running on port ${process.env.PORT}`);
+    console.log(`Server running on port ${process.env.PORT || 3000}`);
 });
